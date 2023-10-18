@@ -18,6 +18,11 @@
 #include <vector>
 #include <algorithm>
 #include <iostream>
+#include <utility>
+#include <cassert>
+#include <chrono>
+#include <thread>
+
 
 namespace DawnAndroid {
     wgpu::Surface surface;
@@ -44,7 +49,7 @@ namespace DawnAndroid {
             return wgpu::TextureFormat::Depth24Plus;
         case AHARDWAREBUFFER_FORMAT_D24_UNORM_S8_UINT:
             printf("AHardwareBufferExternalMemory::AndroidHardwareBuffer_Format AHARDWAREBUFFER_FORMAT_D24_UNORM_S8_UINT");
-            return wgpu::TextureFormat::Depth24UnormStencil8;
+            return wgpu::TextureFormat::Depth24PlusStencil8;
         case AHARDWAREBUFFER_FORMAT_D32_FLOAT:
             return wgpu::TextureFormat::Depth32Float;
         case AHARDWAREBUFFER_FORMAT_D32_FLOAT_S8_UINT:
@@ -107,28 +112,24 @@ namespace DawnAndroid {
                 errorTypeName = "Device lost";
                 break;
             default:
-                UNREACHABLE();
-                return;
+                // TODO(alex): unreachable in c++20?
+                std::cout << "UNREACHBLE" << std::endl;
+                exit(1);
+                // return; 
         }
         printf("%s error: %s", errorTypeName, message);
     }
 
     wgpu::Device AndroidCreateDevice() {
-        instance.DiscoverDefaultAdapters();
-
-        // Get an adapter for the backend to use, and create the device.
-        dawn::native::Adapter backendAdapter;
-        {
-            std::vector<dawn::native::Adapter> adapters = instance.GetAdapters();
-            auto adapterIt = std::find_if(adapters.begin(), adapters.end(),
-                                        [](const dawn::native::Adapter adapter) -> bool {
-                                            wgpu::AdapterProperties properties;
-                                            adapter.GetProperties(&properties);
-                                            return properties.backendType == backendType;
-                                        });
-            ASSERT(adapterIt != adapters.end());
-            backendAdapter = *adapterIt;
+        wgpu::RequestAdapterOptions options = {};
+        options.backendType = backendType;        
+        std::vector<dawn::native::Adapter> adapters = instance.EnumerateAdapters(&options);
+        if (adapters.size() == 0) {
+            std::cout << "Failed to find valid adapter" << std::endl;
+            exit(0);
         }
+
+        dawn::native::Adapter backendAdapter = adapters[0];
 
         WGPUDevice device = backendAdapter.CreateDevice();
         DawnProcTable procs = dawn::native::GetProcs();
@@ -146,12 +147,12 @@ namespace DawnAndroid {
             2,
         };
         indexBuffer =
-            utils::CreateBufferFromData(device, indexData, sizeof(indexData), wgpu::BufferUsage::Index);
+            dawn::utils::CreateBufferFromData(device, indexData, sizeof(indexData), wgpu::BufferUsage::Index);
 
         static const float vertexData[12] = {
             0.0f, 0.5f, 0.0f, 1.0f, -0.5f, -0.5f, 0.0f, 1.0f, 0.5f, -0.5f, 0.0f, 1.0f,
         };
-        vertexBuffer = utils::CreateBufferFromData(device, vertexData, sizeof(vertexData),
+        vertexBuffer = dawn::utils::CreateBufferFromData(device, vertexData, sizeof(vertexData),
                                                 wgpu::BufferUsage::Vertex);
     }
 
@@ -175,11 +176,11 @@ namespace DawnAndroid {
             data[i] = static_cast<uint8_t>(i % 253);
         }
 
-        wgpu::Buffer stagingBuffer = utils::CreateBufferFromData(
+        wgpu::Buffer stagingBuffer = dawn::utils::CreateBufferFromData(
             device, data.data(), static_cast<uint32_t>(data.size()), wgpu::BufferUsage::CopySrc);
         wgpu::ImageCopyBuffer imageCopyBuffer =
-            utils::CreateImageCopyBuffer(stagingBuffer, 0, 4 * 1024);
-        wgpu::ImageCopyTexture imageCopyTexture = utils::CreateImageCopyTexture(texture, 0, {0, 0, 0});
+            dawn::utils::CreateImageCopyBuffer(stagingBuffer, 0, 4 * 1024);
+        wgpu::ImageCopyTexture imageCopyTexture = dawn::utils::CreateImageCopyTexture(texture, 0, {0, 0, 0});
         wgpu::Extent3D copySize = {1024, 1024, 1};
 
         wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
@@ -207,71 +208,51 @@ namespace DawnAndroid {
     }
 
     void Init(ANativeWindow* window, uint32_t width, uint32_t height, int32_t ahbFormat) {
-        
         device = AndroidCreateDevice();
         queue = device.GetQueue();
 
-        
-
-        // auto mSwapchainImpl = dawn::native::vulkan::CreateNativeSwapChainImpl(device.Get(), nullptr);
-        // auto fmt = dawn::native::vulkan::GetNativeSwapChainPreferredFormat(&mSwapchainImpl);
-   
-
         wgpu::SwapChainDescriptor swapChainDesc;
         surface = CreateSurfaceForWindow(instance.Get(), window);
-        // swapChainDesc.implementation = GetSwapChainImplementation();
 
         wgpu::TextureFormat fmt = GetWGPUFormatFromAHBFormat(ahbFormat);
         swapChainDesc.format    = fmt;
         swapChainDesc.width     = width;
         swapChainDesc.height    = height;
-        swapChainDesc.implementation = 0;
         swapChainDesc.presentMode = wgpu::PresentMode::Fifo;
         swapChainDesc.usage = wgpu::TextureUsage::RenderAttachment;
         
         swapchain = device.CreateSwapChain(surface, &swapChainDesc);
-
-        // swapchain.Configure(
-        //     GetPreferredSwapChainTextureFormat(), 
-        //     wgpu::TextureUsage::RenderAttachment,
-        //     640, 
-        //     480
-        // );
-
-        // swapchain.Acquire()
-
-        printf("WHAT\n");
+        
         initBuffers();
-        printf("WHAT2\n");
         initTextures();
 
-        wgpu::ShaderModule vsModule = utils::CreateShaderModule(device, R"(
-            @stage(vertex) fn main(@location(0) pos : vec4<f32>)
+        wgpu::ShaderModule vsModule = dawn::utils::CreateShaderModule(device, R"(
+            @vertex fn main(@location(0) pos : vec4<f32>)
                                 -> @builtin(position) vec4<f32> {
                 return pos;
             })");
 
-        wgpu::ShaderModule fsModule = utils::CreateShaderModule(device, R"(
+        wgpu::ShaderModule fsModule = dawn::utils::CreateShaderModule(device, R"(
             @group(0) @binding(0) var mySampler: sampler;
             @group(0) @binding(1) var myTexture : texture_2d<f32>;
 
-            @stage(fragment) fn main(@builtin(position) FragCoord : vec4<f32>)
+            @fragment fn main(@builtin(position) FragCoord : vec4<f32>)
                                 -> @location(0) vec4<f32> {
                 return textureSample(myTexture, mySampler, FragCoord.xy / vec2<f32>(1080.0, 2296.0));
             })");
 
-        auto bgl = utils::MakeBindGroupLayout(
+        auto bgl = dawn::utils::MakeBindGroupLayout(
             device, {
                         {0, wgpu::ShaderStage::Fragment, wgpu::SamplerBindingType::Filtering},
                         {1, wgpu::ShaderStage::Fragment, wgpu::TextureSampleType::Float},
                     });
 
-        wgpu::PipelineLayout pl = utils::MakeBasicPipelineLayout(device, &bgl);
+        wgpu::PipelineLayout pl = dawn::utils::MakeBasicPipelineLayout(device, &bgl);
 
         depthStencilView = CreateDefaultDepthStencilView(device, width, height);
 
-        utils::ComboRenderPipelineDescriptor descriptor;
-        descriptor.layout = utils::MakeBasicPipelineLayout(device, &bgl);
+        dawn::utils::ComboRenderPipelineDescriptor descriptor;
+        descriptor.layout = dawn::utils::MakeBasicPipelineLayout(device, &bgl);
         descriptor.vertex.module = vsModule;
         descriptor.vertex.bufferCount = 1;
         descriptor.cBuffers[0].arrayStride = 4 * sizeof(float);
@@ -285,7 +266,7 @@ namespace DawnAndroid {
 
         wgpu::TextureView view = texture.CreateView();
 
-        bindGroup = utils::MakeBindGroup(device, bgl, {{0, sampler}, {1, view}});
+        bindGroup = dawn::utils::MakeBindGroup(device, bgl, {{0, sampler}, {1, view}});
     }
 
     struct {
@@ -301,7 +282,8 @@ namespace DawnAndroid {
         }
 
         wgpu::TextureView backbufferView = swapchain.GetCurrentTextureView();
-        utils::ComboRenderPassDescriptor renderPass({backbufferView}, depthStencilView);
+        dawn::utils::ComboRenderPassDescriptor renderPass({backbufferView}, depthStencilView);
+        renderPass.cColorAttachments[0].clearValue = { 1.0, 1.0, 1.0, 1.0 };
 
         wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
         {
@@ -311,7 +293,7 @@ namespace DawnAndroid {
             pass.SetVertexBuffer(0, vertexBuffer);
             pass.SetIndexBuffer(indexBuffer, wgpu::IndexFormat::Uint32);
             pass.DrawIndexed(3);
-            pass.EndPass();
+            pass.End();
         }
 
         wgpu::CommandBuffer commands = encoder.Finish();

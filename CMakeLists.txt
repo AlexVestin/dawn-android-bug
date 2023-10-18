@@ -1,6 +1,11 @@
 project(native_lib C CXX)
 cmake_minimum_required(VERSION 3.3.2)
 
+# TODO from env variable
+SET(NDK_VERSION 25.2.9519653)
+SET(NDK_LOCATION /Users/alexandervestin/Library/Android/sdk/ndk)
+set(ANDROID_NDK ${NDK_LOCATION}/${NDK_VERSION})
+
 message("\n-------Building android application--------\n")
 
 if(NOT CMAKE_BUILD_TYPE)
@@ -9,9 +14,6 @@ endif()
 
 set(SOURCES  "src/util.cpp" "src/main.cpp" "src/lib.cpp")
 
-SET(NDK_VERSION 23.1.7779620)
-
-set(ANDROID_NDK /home/alex/Android/Sdk/ndk/${NDK_VERSION})
 
 # build & link
 include_directories (${CMAKE_BINARY_DIR})
@@ -23,7 +25,9 @@ set (CMAKE_CXX_FLAGS ${COMPILER_FLAGS})
 
 add_library(${CMAKE_PROJECT_NAME} SHARED ${SOURCES}) 
 
-set(DAWN_BUILD_EXAMPLES OFF)
+set(TINT_BUILD_CMD_TOOLS OFF CACHE BOOL "Enable building tint command line tools")
+set(DAWN_BUILD_SAMPLES OFF CACHE BOOL "Enable dawn building samples")
+
 add_subdirectory(dawn)
 set(DAWN_LIBRARIES  
     dawn_internal_config
@@ -48,7 +52,8 @@ target_link_libraries(${PROJECT_NAME} ${DAWN_LIBRARIES})
 
 set_target_properties(${CMAKE_PROJECT_NAME}
   PROPERTIES
-    CXX_STANDARD 17
-    CXX_STANDARD_REQUIRED YES
-    CXX_EXTENSIONS NO
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
 )
+
