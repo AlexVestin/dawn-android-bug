@@ -41,15 +41,7 @@
 #define U_ASSERT_ONLY
 #endif
 
-
-void sample_main(ANativeWindow* app, int32_t command, int w, int h, int fmt);
-
-std::string get_data_dir(std::string filename);
-std::string get_file_directory();
-
 typedef unsigned long long timestamp_t;
-timestamp_t get_milliseconds();
-bool read_ppm(char const *const filename, int &width, int &height, uint64_t rowPitch, unsigned char *dataPtr);
 
 // Android specific definitions & helpers.
 #define LOGI(...) ((void)__android_log_print(ANDROID_LOG_INFO, "DAWN-ANDROID", __VA_ARGS__))
@@ -59,9 +51,6 @@ bool read_ppm(char const *const filename, int &width, int &height, uint64_t rowP
 
 bool Android_process_command();
 ANativeWindow* AndroidGetApplicationWindow();
-FILE* AndroidFopen(const char* fname, const char* mode);
-void AndroidGetWindowSize(int32_t *width, int32_t *height);
-bool AndroidLoadFile(const char* filePath, std::string *data);
 
 // #ifdef __ANDROID__
 // #ifndef VK_API_VERSION_1_0

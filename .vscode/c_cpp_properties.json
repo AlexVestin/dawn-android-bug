@@ -6,12 +6,14 @@
         "includePath": [
             "${workspaceFolder}", 
             "dawn/src/",
-            "dawn/gen/include",
+            "${workspaceFolder}",
+            "${workspaceFolder}/dawn/gen/include",
+            "${workspaceFolder}/dawn/src",
+            "${workspaceFolder}/dawn",
+            "${workspaceFolder}/dawn/include",
             "dawn/include",
-            "/home/alex/Android/Sdk/ndk/23.1.7779620/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include",
-            "/home/alex/Android/Sdk/ndk/23.1.7779620/sysroot/usr/include/",
-            "/home/alex/Android/Sdk/ndk/23.1.7779620/sources/android/",
-            "/home/alex/prog/emsdk/upstream/emscripten/system/include"
+            "/Users/alexandervestin/Library/Android/sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include",
+            "/Users/alexandervestin/Library/Android/sdk/ndk/26.1.10909125/sources/android/"
         ],
         "cStandard": "c11",
         "cppStandard": "c++17",

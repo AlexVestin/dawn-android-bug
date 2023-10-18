@@ -12,7 +12,7 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-set(SOURCES  "src/util.cpp" "src/main.cpp" "src/lib.cpp")
+set(SOURCES  "src/util.cpp" "src/lib.cpp")
 
 
 # build & link

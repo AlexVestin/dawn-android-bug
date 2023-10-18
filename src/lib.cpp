@@ -14,6 +14,7 @@
 
 #include "lib.h"
 #include "util.h"
+#include "helpers.h"
 
 #include <vector>
 #include <algorithm>
@@ -23,108 +24,145 @@
 #include <chrono>
 #include <thread>
 
+static const wgpu::BackendType backendType = wgpu::BackendType::Vulkan;
 
-namespace DawnAndroid {
-    wgpu::Surface surface;
+static const char *shader = R"(
+// SPDX-License-Identifier: Apache-2.0 OR MIT OR Unlicense
+
+struct PathInfo {
+    bb_tl: u32,
+    bb_br: u32
+}
+
+struct ComputeUniforms {
+    path_count: u32,
+}
+
+@group(0) @binding(0) var<storage, read> path_info: array<PathInfo>;
+@group(0) @binding(1) var<storage, read_write> bin_header: array<atomic<u32>>;
+@group(0) @binding(2) var<uniform> compute_uniforms: ComputeUniforms;
+
+const WG_SIZE = 256u;
+const N_TILE = 256u;
+const TILE_SIZE = 16u;
+const uniform_width = 1080u;
+
+var<workgroup> sh_counts: array<atomic<u32>, 256>;
+
+fn div_up(v: u32, c: u32) -> u32 {
+    return (v + (c - 1u)) / c; 
+}
+
+struct TRBLRect{
+    t: u32,
+    r: u32,
+    b: u32,
+    l: u32
+}
+
+fn get_trbl_rect(tl: u32, br: u32) -> TRBLRect {
+    let t = (tl >> 16u) & 0xffffu;
+    let l = tl & 0xffffu;
+    let b = (br >> 16u) & 0xffffu;
+    let r = br & 0xffffu;
+    return TRBLRect(t, r, b, l);
+}
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(workgroup_id) wg_id: vec3<u32>,
+) {
+    atomicStore(&sh_counts[local_id.x], 0u);   
+    workgroupBarrier();
+    let element_ix = global_id.x;
+    
+    var path_area = TRBLRect(0u, 0u, 0u, 0u);
+    if element_ix < 303u {
+        let info = path_info[element_ix];
+        path_area = get_trbl_rect(info.bb_tl, info.bb_br);
+    }
+
+    let width_in_bins = div_up(div_up(uniform_width, TILE_SIZE), TILE_SIZE);
+    
+    let x0 = path_area.l / TILE_SIZE;
+    let y0 = path_area.t / TILE_SIZE;
+    let x1 = div_up(path_area.r, TILE_SIZE) * u32(element_ix < 303u);
+    var y1 = div_up(path_area.b, TILE_SIZE) * u32(element_ix < 303u);
+
+    if x0 == x1 {
+        y1 = y0;
+    }
+    
+    workgroupBarrier();
+    // --- 1 --- 
+    for (var y = y0; y < y1; y++) {
+        for (var x = x0; x < x1; x++) {
+            atomicAdd(&sh_counts[y * width_in_bins + x], 1u);
+        }
+    }
+    
+    // --- 2 ---
+    // if (local_id.x < 128u) {
+    //     for (var y = y0; y < y1; y++) {
+    //         for (var x = x0; x < x1; x++) {
+    //             atomicAdd(&sh_counts[y * width_in_bins + x], 1u);
+    //         }
+    //     }
+    // }
+    // workgroupBarrier();
+    // if (local_id.x >= 128u) {
+    //     for (var y = y0; y < y1; y++) {
+    //         for (var x = x0; x < x1; x++) {
+    //             atomicAdd(&sh_counts[y * width_in_bins + x], 1u);
+    //         }
+    //     }
+    // }
+
+    // --- 3 ---
+    // atomicStore(&sh_counts[local_id.x], local_id.x + 4u);
+
+    workgroupBarrier();
+    let num_partitions = div_up(compute_uniforms.path_count, WG_SIZE);
+    let v = atomicLoad(&sh_counts[local_id.x]);
+    
+    // -- a ---
+    for (var i = wg_id.x; i < 2u; i++) {
+        atomicAdd(&bin_header[local_id.x * 2u + i], v);
+    }
+
+    // --- b ---
+    // for (var i = 0u; i < 2u; i++) {
+    //     atomicAdd(&bin_header[local_id.x * 2u + i], v);
+    // }
+}
+)";
+
+namespace DawnAndroid
+{
     dawn::native::Instance instance;
     wgpu::Device device;
-    wgpu::Buffer indexBuffer;
-    wgpu::Buffer vertexBuffer;
-    wgpu::Texture texture;
-    wgpu::Sampler sampler;
-    wgpu::Queue queue;
-    wgpu::SwapChain swapchain;
-    wgpu::TextureView depthStencilView;
-    wgpu::RenderPipeline pipeline;
+
+    wgpu::Buffer pathAreaBuffer;
+    wgpu::Buffer outputBuffer;
+    wgpu::Buffer uniformBuffer;
+
+    wgpu::ComputePipeline pipeline;
     wgpu::BindGroup bindGroup;
-    wgpu::TextureFormat GetWGPUFormatFromAHBFormat(uint32_t ahbFormat) {
-        switch(ahbFormat)
-        {
-        case AHARDWAREBUFFER_FORMAT_BLOB:
-            return wgpu::TextureFormat::Undefined;
-        case AHARDWAREBUFFER_FORMAT_D16_UNORM:
-            return wgpu::TextureFormat::Depth16Unorm;
-        case AHARDWAREBUFFER_FORMAT_D24_UNORM:
-            printf("AHardwareBufferExternalMemory::AndroidHardwareBuffer_Format AHARDWAREBUFFER_FORMAT_D24_UNORM");
-            return wgpu::TextureFormat::Depth24Plus;
-        case AHARDWAREBUFFER_FORMAT_D24_UNORM_S8_UINT:
-            printf("AHardwareBufferExternalMemory::AndroidHardwareBuffer_Format AHARDWAREBUFFER_FORMAT_D24_UNORM_S8_UINT");
-            return wgpu::TextureFormat::Depth24PlusStencil8;
-        case AHARDWAREBUFFER_FORMAT_D32_FLOAT:
-            return wgpu::TextureFormat::Depth32Float;
-        case AHARDWAREBUFFER_FORMAT_D32_FLOAT_S8_UINT:
-            return wgpu::TextureFormat::Depth32FloatStencil8;
-        case AHARDWAREBUFFER_FORMAT_R10G10B10A2_UNORM:
-            return wgpu::TextureFormat::RGB10A2Unorm;
-        case AHARDWAREBUFFER_FORMAT_R16G16B16A16_FLOAT:
-            return wgpu::TextureFormat::RGBA16Float;
-        //case AHARDWAREBUFFER_FORMAT_R5G6B5_UNORM//:
-        //	return wgpu::TextureFormat::R5;//
-        case AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM:
-            return wgpu::TextureFormat::RGBA8Unorm;
-        // case AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM:
-        // 	return wgpu::TextureFormat::RGB;
-        //case AHARDWAREBUFFER_FORMAT_R8G8B8_UNORM:
-        //	return wgpu::TextureFormat::RGB8Unorm;
-        case AHARDWAREBUFFER_FORMAT_S8_UINT:
-            return wgpu::TextureFormat::Stencil8;
-        case AHARDWAREBUFFER_FORMAT_Y8Cb8Cr8_420:
-        //case AHARDWAREBUFFER_FORMAT_YV12:
-        //	return VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM;
-        //case AHARDWAREBUFFER_FORMAT_YCbCr_P010:
-        //	return VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
-        default:
-            printf("AHardwareBufferExternalMemory::AHardwareBuffer_Format %d", int(ahbFormat));
-            return wgpu::TextureFormat::Undefined;
-        }
+
+    void PrintDeviceError(WGPUErrorType errorType, const char *message, void *)
+    {
+        printf("%s error: %s", "Unknown", message);
     }
 
-    static wgpu::BackendType backendType = wgpu::BackendType::Vulkan;
-
-    wgpu::TextureView CreateDefaultDepthStencilView(const wgpu::Device& device, uint32_t width, uint32_t height) {
-        wgpu::TextureDescriptor descriptor;
-        descriptor.dimension = wgpu::TextureDimension::e2D;
-        descriptor.size.width = width;
-        descriptor.size.height = height;
-        descriptor.size.depthOrArrayLayers = 1;
-        descriptor.sampleCount = 1;
-        descriptor.format = wgpu::TextureFormat::Depth24PlusStencil8;
-        descriptor.mipLevelCount = 1;
-        descriptor.usage = wgpu::TextureUsage::RenderAttachment;
-        auto depthStencilTexture = device.CreateTexture(&descriptor);
-        return depthStencilTexture.CreateView();
-    }
-
-
-    void PrintDeviceError(WGPUErrorType errorType, const char* message, void*) {
-        const char* errorTypeName = "";
-        switch (errorType) {
-            case WGPUErrorType_Validation:
-                errorTypeName = "Validation";
-                break;
-            case WGPUErrorType_OutOfMemory:
-                errorTypeName = "Out of memory";
-                break;
-            case WGPUErrorType_Unknown:
-                errorTypeName = "Unknown";
-                break;
-            case WGPUErrorType_DeviceLost:
-                errorTypeName = "Device lost";
-                break;
-            default:
-                // TODO(alex): unreachable in c++20?
-                std::cout << "UNREACHBLE" << std::endl;
-                exit(1);
-                // return; 
-        }
-        printf("%s error: %s", errorTypeName, message);
-    }
-
-    wgpu::Device AndroidCreateDevice() {
+    wgpu::Device AndroidCreateDevice()
+    {
         wgpu::RequestAdapterOptions options = {};
-        options.backendType = backendType;        
+        options.backendType = backendType;
         std::vector<dawn::native::Adapter> adapters = instance.EnumerateAdapters(&options);
-        if (adapters.size() == 0) {
+        if (adapters.size() == 0)
+        {
             std::cout << "Failed to find valid adapter" << std::endl;
             exit(0);
         }
@@ -133,172 +171,69 @@ namespace DawnAndroid {
 
         WGPUDevice device = backendAdapter.CreateDevice();
         DawnProcTable procs = dawn::native::GetProcs();
-   
+
         dawnProcSetProcs(&procs);
         procs.deviceSetUncapturedErrorCallback(device, PrintDeviceError, nullptr);
         return wgpu::Device::Acquire(device);
     }
 
-
-    void initBuffers() {
-        static const uint32_t indexData[3] = {
-            0,
-            1,
-            2,
-        };
-        indexBuffer =
-            dawn::utils::CreateBufferFromData(device, indexData, sizeof(indexData), wgpu::BufferUsage::Index);
-
-        static const float vertexData[12] = {
-            0.0f, 0.5f, 0.0f, 1.0f, -0.5f, -0.5f, 0.0f, 1.0f, 0.5f, -0.5f, 0.0f, 1.0f,
-        };
-        vertexBuffer = dawn::utils::CreateBufferFromData(device, vertexData, sizeof(vertexData),
-                                                wgpu::BufferUsage::Vertex);
-    }
-
-    void initTextures() {
-        wgpu::TextureDescriptor descriptor;
-        descriptor.dimension = wgpu::TextureDimension::e2D;
-        descriptor.size.width = 1024;
-        descriptor.size.height = 1024;
-        descriptor.size.depthOrArrayLayers = 1;
-        descriptor.sampleCount = 1;
-        descriptor.format = wgpu::TextureFormat::RGBA8Unorm;
-        descriptor.mipLevelCount = 1;
-        descriptor.usage = wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::TextureBinding;
-        texture = device.CreateTexture(&descriptor);
-
-        sampler = device.CreateSampler();
-
-        // Initialize the texture with arbitrary data until we can load images
-        std::vector<uint8_t> data(4 * 1024 * 1024, 0);
-        for (size_t i = 0; i < data.size(); ++i) {
-            data[i] = static_cast<uint8_t>(i % 253);
-        }
-
-        wgpu::Buffer stagingBuffer = dawn::utils::CreateBufferFromData(
-            device, data.data(), static_cast<uint32_t>(data.size()), wgpu::BufferUsage::CopySrc);
-        wgpu::ImageCopyBuffer imageCopyBuffer =
-            dawn::utils::CreateImageCopyBuffer(stagingBuffer, 0, 4 * 1024);
-        wgpu::ImageCopyTexture imageCopyTexture = dawn::utils::CreateImageCopyTexture(texture, 0, {0, 0, 0});
-        wgpu::Extent3D copySize = {1024, 1024, 1};
-
-        wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
-        encoder.CopyBufferToTexture(&imageCopyBuffer, &imageCopyTexture, &copySize);
-
-        wgpu::CommandBuffer copy = encoder.Finish();
-        queue.Submit(1, &copy);
-    }
-
-    std::unique_ptr<wgpu::ChainedStruct> GetAndroidNativeWindowDescriptor(void* window) {
-        std::unique_ptr<wgpu::SurfaceDescriptorFromAndroidNativeWindow> desc =
-            std::make_unique<wgpu::SurfaceDescriptorFromAndroidNativeWindow>();
-        desc->window = window;
-        desc->sType = wgpu::SType::SurfaceDescriptorFromAndroidNativeWindow;
-        return std::move(desc);
-    }
-
-    wgpu::Surface CreateSurfaceForWindow(const wgpu::Instance& instance, void* window) {
-        std::unique_ptr<wgpu::ChainedStruct> chainedDescriptor =
-            GetAndroidNativeWindowDescriptor(window);
-
-        wgpu::SurfaceDescriptor descriptor;
-        descriptor.nextInChain = chainedDescriptor.get();
-        return instance.CreateSurface(&descriptor);
-    }
-
-    void Init(ANativeWindow* window, uint32_t width, uint32_t height, int32_t ahbFormat) {
+    void Init(uint32_t width, uint32_t height)
+    {
         device = AndroidCreateDevice();
-        queue = device.GetQueue();
 
-        wgpu::SwapChainDescriptor swapChainDesc;
-        surface = CreateSurfaceForWindow(instance.Get(), window);
+        pathAreaBuffer =
+            dawn::utils::CreateBufferFromData(device, pathAreaData, 512 * sizeof(uint32_t), wgpu::BufferUsage::Storage);
 
-        wgpu::TextureFormat fmt = GetWGPUFormatFromAHBFormat(ahbFormat);
-        swapChainDesc.format    = fmt;
-        swapChainDesc.width     = width;
-        swapChainDesc.height    = height;
-        swapChainDesc.presentMode = wgpu::PresentMode::Fifo;
-        swapChainDesc.usage = wgpu::TextureUsage::RenderAttachment;
-        
-        swapchain = device.CreateSwapChain(surface, &swapChainDesc);
-        
-        initBuffers();
-        initTextures();
+        uint32_t numPaths = 303;
+        uniformBuffer = dawn::utils::CreateBufferFromData(device, &numPaths, sizeof(uint32_t), wgpu::BufferUsage::Uniform);
 
-        wgpu::ShaderModule vsModule = dawn::utils::CreateShaderModule(device, R"(
-            @vertex fn main(@location(0) pos : vec4<f32>)
-                                -> @builtin(position) vec4<f32> {
-                return pos;
-            })");
+        wgpu::BufferDescriptor descriptor;
+        descriptor.size = 512 * sizeof(uint32_t);
+        descriptor.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc;
+        outputBuffer = device.CreateBuffer(&descriptor);
 
-        wgpu::ShaderModule fsModule = dawn::utils::CreateShaderModule(device, R"(
-            @group(0) @binding(0) var mySampler: sampler;
-            @group(0) @binding(1) var myTexture : texture_2d<f32>;
-
-            @fragment fn main(@builtin(position) FragCoord : vec4<f32>)
-                                -> @location(0) vec4<f32> {
-                return textureSample(myTexture, mySampler, FragCoord.xy / vec2<f32>(1080.0, 2296.0));
-            })");
-
-        auto bgl = dawn::utils::MakeBindGroupLayout(
-            device, {
-                        {0, wgpu::ShaderStage::Fragment, wgpu::SamplerBindingType::Filtering},
-                        {1, wgpu::ShaderStage::Fragment, wgpu::TextureSampleType::Float},
-                    });
-
-        wgpu::PipelineLayout pl = dawn::utils::MakeBasicPipelineLayout(device, &bgl);
-
-        depthStencilView = CreateDefaultDepthStencilView(device, width, height);
-
-        dawn::utils::ComboRenderPipelineDescriptor descriptor;
-        descriptor.layout = dawn::utils::MakeBasicPipelineLayout(device, &bgl);
-        descriptor.vertex.module = vsModule;
-        descriptor.vertex.bufferCount = 1;
-        descriptor.cBuffers[0].arrayStride = 4 * sizeof(float);
-        descriptor.cBuffers[0].attributeCount = 1;
-        descriptor.cAttributes[0].format = wgpu::VertexFormat::Float32x4;
-        descriptor.cFragment.module = fsModule;
-        descriptor.cTargets[0].format = fmt;
-        descriptor.EnableDepthStencil(wgpu::TextureFormat::Depth24PlusStencil8);
-
-        pipeline = device.CreateRenderPipeline(&descriptor);
-
-        wgpu::TextureView view = texture.CreateView();
-
-        bindGroup = dawn::utils::MakeBindGroup(device, bgl, {{0, sampler}, {1, view}});
+        auto bgl =
+            dawn::utils::MakeBindGroupLayout(device, {
+                                                         {0, wgpu::ShaderStage::Compute, wgpu::BufferBindingType::ReadOnlyStorage},
+                                                         {1, wgpu::ShaderStage::Compute, wgpu::BufferBindingType::Storage},
+                                                         {2, wgpu::ShaderStage::Compute, wgpu::BufferBindingType::Uniform},
+                                                     });
+        pipeline = CreatePipeline(device, bgl, shader, "Binning");
+        bindGroup = dawn::utils::MakeBindGroup(device, bgl, {{0, pathAreaBuffer}, {1, outputBuffer}, {2, uniformBuffer}});
     }
 
-    struct {
-        uint32_t a;
-        float b;
-    } s;
-
-    void Frame() {
-        s.a = (s.a + 1) % 256;
-        s.b += 0.02f;
-        if (s.b >= 1.0f) {
-            s.b = 0.0f;
-        }
-
-        wgpu::TextureView backbufferView = swapchain.GetCurrentTextureView();
-        dawn::utils::ComboRenderPassDescriptor renderPass({backbufferView}, depthStencilView);
-        renderPass.cColorAttachments[0].clearValue = { 1.0, 1.0, 1.0, 1.0 };
-
+    void Frame()
+    {
         wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
-        {
-            wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&renderPass);
-            pass.SetPipeline(pipeline);
-            pass.SetBindGroup(0, bindGroup);
-            pass.SetVertexBuffer(0, vertexBuffer);
-            pass.SetIndexBuffer(indexBuffer, wgpu::IndexFormat::Uint32);
-            pass.DrawIndexed(3);
-            pass.End();
-        }
+        wgpu::ComputePassDescriptor descriptor;
+        wgpu::ComputePassEncoder passEncoder = encoder.BeginComputePass(&descriptor);
+
+        passEncoder.SetPipeline(pipeline);
+        passEncoder.SetBindGroup(0, bindGroup);
+        passEncoder.DispatchWorkgroups(1);
+        passEncoder.End();
 
         wgpu::CommandBuffer commands = encoder.Finish();
-        queue.Submit(1, &commands);
-        swapchain.Present();
-    }
-};
+        device.GetQueue().Submit(1, &commands);
 
+        bool done = false;
+        device.GetQueue().OnSubmittedWorkDone(
+            [](WGPUQueueWorkDoneStatus status, void *userdata) -> void
+            { *(static_cast<bool *>(userdata)) = true; },
+            &done);
+
+        while (!done)
+        {
+            device.Tick();
+            std::this_thread::sleep_for(std::chrono::microseconds{1});
+        }
+
+        std::vector<uint32_t> outputData = CopyReadBackBuffer<uint32_t>(device, outputBuffer, 256 * sizeof(uint32_t));
+
+        for (int i = 0; i < 4; i++)
+        {
+            LOGI("%d ", outputData[i]);
+        }
+        LOGI("\nDone\n");
+    }
+}

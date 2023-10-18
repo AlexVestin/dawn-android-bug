@@ -11,13 +11,8 @@
 #include <memory>
 
 namespace DawnAndroid {
-    void Init(
-        ANativeWindow* window, 
-        uint32_t width, 
-        uint32_t height,
-        int32_t ahbFormat);
+    void Init(uint32_t width, uint32_t height);
     void Frame();
-    wgpu::TextureFormat GetVkFormatFromAHBFormat(uint32_t ahbFormat);
 };
 
 #endif // define __DAWN_ANDROID_LIB_H

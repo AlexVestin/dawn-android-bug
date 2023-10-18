@@ -46,11 +46,4 @@ externalNativeBuild {
 add to `dependencies`
 `implementation "androidx.startup:startup-runtime:1.1.1"`
 
-Change `applicationId` to match the AndroidManifest.xml id
-
-
-* In build.gradle, change if needed:
-  - file path to CMakeLists.txt
-  - ndkVersion
-  - applicationId
-- In AndroidManifest.xml change the name of the package
+Replace the `AndroidManifest.xml` with the one in android_studio_files, or create a matching Activity
